@@ -2,6 +2,7 @@ import asyncHandler from "../utils/asyncHandler.js";
 import { ApiError } from "../utils/ApiError.js";
 import { ApiResponse } from "../utils/ApiResponse.js";
 import User from "../models/user.model.js";
+import mongoose, { isValidObjectId } from "mongoose";
 //// All stuffed related to the user
 const generateAccessToken=async(user)=>
 {
@@ -99,7 +100,8 @@ const changeCurrentPassword=asyncHandler(async(req,res)=>{
       await user.save({validateBeforeSave:false});
       return res.status(200).json(new ApiResponse(200,{},"password change successfully")); 
 })
-const searchUser = asyncHandler(async (req, res) => {
+const searchUser = asyncHandler(async (req, res) => 
+  {
     const { keyword } = req.query;
   
     if (!keyword || keyword.trim() === "") {
@@ -124,7 +126,46 @@ const searchUser = asyncHandler(async (req, res) => {
       return res.status(500).json(new ApiError(500, "An error occurred while searching for users"));
     }
   });
+const sendFriendrequest=asyncHandler(async(req,res)=>{
+     const {userId}=req.body;
+     const {senderId}=req.user._id;
+     if(!isValidObjectId(userId) ||!isValidObjectId(requestId))
+     {
+       throw new ApiError(401,`please enter valid userId or SenderId`);
+     }
+     if(userId==senderId.toString())
+     {
+      return res.status(400).json(new ApiError(400, "You cannot send a request to yourself"));
+     }
+     try 
+     {
+       const receiver=await User.findById(userId);
+       if(!receiver)
+       {
+        return res.status(404).json(new ApiError(404, "User not found"));
+       }
+       const existingRequest = receiver.friendRequests.find(
+        (req) => req.sender.toString() === senderId.toString() && req.status === "Pending"
+      );
+      if (existingRequest) {
+        return res.status(400).json(new ApiError(400, "Friend request already sent"));
+      }
+      receiver.friendRequests.push({ sender: senderId, status: "Pending" });
+      await receiver.save();
+      receiver.friendRequests.push({sender:senderId,status:"Pending"});
 
+      if(req.app.get("socketio"))
+      {
+        const io = req.app.get("socketio");
+        io.to(receiver._id.toString()).emit("friend_request", { senderId, senderName: req.user.fullname });
+      }
+      return res.status(200).json(new ApiResponse(200, null, "Friend request sent successfully"));
+     } 
+     catch (error) {
+      console.error("Error sending friend request:", error);
+      return res.status(500).json(new ApiError(500, "An error occurred while sending friend request"));
+     }
+})
 const  mutualfriend=asyncHandler(async(req,res)=>
 {
     const {userId1,userId2}=req.query;
@@ -134,12 +175,66 @@ const  mutualfriend=asyncHandler(async(req,res)=>
         { $group: { _id: null, commonFriends: { $setIntersection: ["$friends", "$friends"] } } }
       ]);
 }) ;
+const managefriendRequest=asyncHandler(async(req,res)=>
+{
+  const { senderId, action } = req.body; // senderId: who sent the request, action: Accept/Reject
+  const userId = req.user._id;
 
+  if (!senderId || !["Accept", "Reject"].includes(action)) {
+    return res.status(400).json(new ApiError(400, "Invalid request data"));
+  }
+
+  try {
+    const user = await User.findById(userId);
+    if (!user) {
+      return res.status(404).json(new ApiError(404, "User not found"));
+    }
+
+    const friendRequest = user.friendRequests.find(
+      (req) => req.sender.toString() === senderId.toString() && req.status === "Pending"
+    );
+
+    if (!friendRequest) {
+      return res.status(400).json(new ApiError(400, "Friend request not found or already managed"));
+    }
+
+    if (action === "Accept") {
+      // Update request status
+      friendRequest.status = "Accepted";
+
+      // Add sender to the user's friends list
+      user.friend.push(senderId);
+
+      // Add user to the sender's friends list
+      const sender = await User.findById(senderId);
+      sender.friend.push(userId);
+      await sender.save();
+    } else if (action === "Reject") {
+      friendRequest.status = "Rejected";
+    }
+
+    await user.save();
+
+    // Notify sender via Socket.IO (if configured)
+    if (req.app.get("socketio")) {
+      const io = req.app.get("socketio");
+      io.to(senderId.toString()).emit("friend_request_update", { userId, action });
+    }
+
+    return res.status(200).json(new ApiResponse(200, null, `Friend request ${action.toLowerCase()}ed successfully`));
+  } catch (error) {
+    console.error("Error managing friend request:", error);
+    return res.status(500).json(new ApiError(500, "An error occurred while managing friend request"));
+  }
+}
+);
 export  
 {
+    sendFriendrequest,
     searchUser,
     registerUser,
     loginUser,
     logoutUser,
     changeCurrentPassword,
+    mutualfriend
 };
